@@ -1,90 +1,42 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WebSocketsServer.h>
 
 const char* ssid = "DOAN NHI_2.4G";
 const char* password =  "nhichuc01";
 
 WebServer server(80);
-int ledPin = 2;  // LED GPIO 2
+WebSocketsServer webSocket(81);
 
-// Web game
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Mini Fight Game</title>
-</head>
-<body>
-  <canvas id="game" width="400" height="300"></canvas>
-  <script>
-    const canvas=document.getElementById("game");
-    const ctx=canvas.getContext("2d");
+const int ledPin = 2; // LED báo hiệu
 
-    let player={x:50,y:220,w:30,h:30,color:"blue",hp:3};
-    let enemy ={x:300,y:220,w:30,h:30,color:"red",hp:3};
+void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  if (type == WStype_TEXT) {
+    String msg = String((char*)payload);
 
-    document.addEventListener("keydown",e=>{
-      if(e.key==="ArrowLeft") player.x -= 10;
-      if(e.key==="ArrowRight") player.x += 10;
-      if(e.key===" "){
-        if(Math.abs(player.x-enemy.x)<40){
-          enemy.hp--;
-          if(enemy.hp<=0) endGame("win");
-        }
-      }
-    });
-
-    function update(){
-      ctx.clearRect(0,0,400,300);
-      ctx.fillStyle=player.color; ctx.fillRect(player.x,player.y,player.w,player.h);
-      ctx.fillStyle=enemy.color;  ctx.fillRect(enemy.x,enemy.y,enemy.w,enemy.h);
-      ctx.fillStyle="black"; ctx.fillText("Enemy HP: "+enemy.hp,300,20);
-      requestAnimationFrame(update);
+    if (msg == "WIN") {
+      Serial.println("Kết quả: WIN");
+      digitalWrite(ledPin, HIGH);
+      delay(2000);
+      digitalWrite(ledPin, LOW);
     }
-
-    function endGame(r){
-      alert(r=="win"?"Bạn thắng!":"Bạn thua!");
-      fetch("/led?status="+r);
+    else if (msg == "LOSE") {
+      Serial.println("Kết quả: LOSE");
+      digitalWrite(ledPin, HIGH);
+      delay(5000);
+      digitalWrite(ledPin, LOW);
     }
-
-    update();
-  </script>
-</body>
-</html>
-)rawliteral";
-
-// ⚡ Biến để hẹn giờ tắt LED
-unsigned long ledOnTime = 0; 
-bool ledActive = false;
-
-void handleLed(){
-  if(server.hasArg("status")){
-    String st = server.arg("status");
-    if(st=="win"){
-      digitalWrite(ledPin, HIGH);   // bật LED
-      ledOnTime = millis();         // ghi lại thời điểm bật
-      ledActive = true;
-      server.send(200,"text/plain","LED WIN: ON (auto off)");
-    } else if(st=="lose"){
-      digitalWrite(ledPin, LOW);    // lose → LED tắt luôn
-      ledActive = false;
-      server.send(200,"text/plain","LED LOSE: OFF");
-    } else {
-      server.send(200,"text/plain","Unknown state");
-    }
-  } else {
-    server.send(400,"text/plain","Missing status arg");
   }
 }
 
-void setup(){
+void setup() {
   Serial.begin(115200);
   pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
 
   WiFi.begin(ssid, password);
   Serial.print("Đang kết nối WiFi");
-  while(WiFi.status()!=WL_CONNECTED){
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
@@ -92,19 +44,109 @@ void setup(){
   Serial.print("ESP32 IP: ");
   Serial.println(WiFi.localIP());
 
-  server.on("/", [](){ server.send_P(200,"text/html",index_html); });
-  server.on("/led", handleLed);
+  server.on("/", []() {
+    server.send(200, "text/html", R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Game Đối Kháng ESP32</title>
+  <style>
+    canvas { background: #eee; display:block; margin: 20px auto; }
+    h2 { text-align:center; }
+  </style>
+</head>
+<body>
+  <h2>Game Đối Kháng ESP32</h2>
+  <canvas id="gameCanvas" width="400" height="300"></canvas>
+  <script>
+    var ws = new WebSocket('ws://' + window.location.hostname + ':81/');
+    let canvas = document.getElementById("gameCanvas");
+    let ctx = canvas.getContext("2d");
+
+    // Nhân vật chính
+    let player = {x:50, y:200, w:30, h:30, color:"blue", hp:100};
+    // Quái
+    let enemy = {x:300, y:200, w:30, h:30, color:"red", hp:100};
+
+    let keys = {};
+
+    document.addEventListener("keydown", e => keys[e.key] = true);
+    document.addEventListener("keyup", e => keys[e.key] = false);
+
+    function update() {
+      // Điều khiển nhân vật (WASD)
+      if (keys["a"]) player.x -= 2;
+      if (keys["d"]) player.x += 2;
+      if (keys["w"]) player.y -= 2;
+      if (keys["s"]) player.y += 2;
+
+      // Tấn công (Space)
+      if (keys[" "]) {
+        if (Math.abs(player.x - enemy.x) < 35 && Math.abs(player.y - enemy.y) < 35) {
+          enemy.hp -= 1;
+        }
+      }
+
+      // Enemy "phản công" đơn giản
+      if (Math.random() < 0.01) {
+        if (Math.abs(player.x - enemy.x) < 35 && Math.abs(player.y - enemy.y) < 35) {
+          player.hp -= 1;
+        }
+      }
+
+      // Kết thúc game
+      if (enemy.hp <= 0) {
+        ws.send("WIN");
+        alert("Bạn thắng!");
+        resetGame();
+      }
+      if (player.hp <= 0) {
+        ws.send("LOSE");
+        alert("Bạn thua!");
+        resetGame();
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // Player
+      ctx.fillStyle = player.color;
+      ctx.fillRect(player.x, player.y, player.w, player.h);
+      ctx.fillStyle = "black";
+      ctx.fillText("HP:"+player.hp, player.x, player.y-5);
+
+      // Enemy
+      ctx.fillStyle = enemy.color;
+      ctx.fillRect(enemy.x, enemy.y, enemy.w, enemy.h);
+      ctx.fillStyle = "black";
+      ctx.fillText("HP:"+enemy.hp, enemy.x, enemy.y-5);
+    }
+
+    function loop() {
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    function resetGame() {
+      player.x=50; player.y=200; player.hp=100;
+      enemy.x=300; enemy.y=200; enemy.hp=100;
+    }
+
+    loop();
+  </script>
+</body>
+</html>
+    )rawliteral");
+  });
 
   server.begin();
-  Serial.println("WebServer đã sẵn sàng!");
+  webSocket.begin();
+  webSocket.onEvent(onWebSocketEvent);
 }
 
-void loop(){
+void loop() {
   server.handleClient();
-
-  // ⏳ Kiểm tra nếu LED đã bật quá 2 giây thì tắt
-  if(ledActive && millis() - ledOnTime >= 2000){
-    digitalWrite(ledPin, LOW);
-    ledActive = false;
-  }
+  webSocket.loop();
 }
